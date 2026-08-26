@@ -46,8 +46,6 @@ func ParseIncomingMessage(raw, senderID string) ChatMessage {
 }
 
 func HandleClient(client *Client) error {
-	defer client.Conn.Close()
-
 	conn := client.Conn
 	scanner := bufio.NewScanner(conn)
 
@@ -55,6 +53,8 @@ func HandleClient(client *Client) error {
 		content := scanner.Text()
 		msg := ParseIncomingMessage(content, client.ID)
 		formattedMsg := FormatMessage(msg)
+
+		fmt.Printf("[%s] Received from %s: %s\n", msg.Timestamp.Format("15:04:05"), msg.ClientID, msg.Content)
 
 		if _, err := conn.Write([]byte(formattedMsg + "\n")); err != nil {
 			return fmt.Errorf("write error to %s: %w", conn.RemoteAddr(), err)
@@ -70,6 +70,24 @@ func HandleClient(client *Client) error {
 
 func GenerateClientID() string {
 	return uuid.New().String()[:8]
+}
+
+func handleClient(conn net.Conn, clientID string) {
+	defer conn.Close()
+
+	fmt.Printf("Client %s connected, starting goroutine\n", clientID)
+
+	client := &Client{
+		ID:       clientID,
+		Conn:     conn,
+		JoinTime: time.Now(),
+	}
+
+	if err := HandleClient(client); err != nil {
+		fmt.Printf("Client %s error: %v\n", client.ID, err)
+	}
+
+	fmt.Printf("Client %s disconnected\n", client.ID)
 }
 
 func StartEchoServer(port string) error {
@@ -89,21 +107,10 @@ func StartEchoServer(port string) error {
 		if err != nil {
 			return fmt.Errorf("failed to accept connection: %w", err)
 		}
-		go func() {
-			client := &Client{
-				ID:       "User_" + GenerateClientID(),
-				Conn:     conn,
-				JoinTime: time.Now(),
-			}
 
-			fmt.Printf("Client %s connected\n", client.ID)
+		clientID := "User_" + GenerateClientID()
 
-			if err = HandleClient(client); err != nil {
-				fmt.Printf("Client %s error: %v\n", client.ID, err)
-			}
-
-			fmt.Printf("Client %s disconnected\n", client.ID)
-		}()
+		go handleClient(conn, clientID)
 	}
 }
 
