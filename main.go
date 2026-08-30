@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -35,16 +36,149 @@ type CountRequest struct {
 	Response chan int
 }
 
+type MessageHistory struct {
+	messages []ChatMessage
+	head     int
+	size     int
+}
+
 type Hub struct {
-	Clients    map[string]*Client
-	Broadcast  chan ChatMessage
-	register   chan *Client
-	unregister chan *Client
-	clientsReq chan *Request
-	countReq   chan *CountRequest
+	Clients        map[string]*Client
+	Broadcast      chan ChatMessage
+	register       chan *Client
+	unregister     chan *Client
+	clientsReq     chan *Request
+	countReq       chan *CountRequest
+	MessageHistory MessageHistory
 }
 
 const readTimeout = 10 * time.Minute
+const historySize = 50
+
+func (mh *MessageHistory) Add(msg ChatMessage) {
+	mh.messages[mh.head%mh.size] = msg
+	mh.head++
+}
+
+func (mh *MessageHistory) GetRecent() []ChatMessage {
+	if mh.head == 0 {
+		return []ChatMessage{}
+	}
+
+	if mh.head < mh.size {
+		return mh.messages[0:mh.head]
+	}
+
+	buff := mh.head % mh.size
+	result := make([]ChatMessage, mh.size)
+
+	copy(result, mh.messages[buff:])
+	copy(result[mh.size-buff:], mh.messages[0:buff])
+
+	return result
+}
+
+func (h *Hub) SendUserList(client *Client) {
+	clientIds := h.GetActiveClients()
+
+	count := len(clientIds)
+
+	content := fmt.Sprintf("Online users (%d): %s", count, strings.Join(clientIds, ", "))
+
+	msg := ChatMessage{
+		Timestamp:   time.Now(),
+		ClientID:    "server",
+		Content:     content,
+		MessageType: "system",
+	}
+
+	formatted := FormatMessage(msg)
+	if _, err := client.Conn.Write([]byte(formatted + "\n")); err != nil {
+		fmt.Printf("write system error of sender user list to %s: %v\n", client.Conn.RemoteAddr(), err)
+	}
+}
+
+func (h *Hub) HandleCommand(client *Client, command string) {
+	switch command {
+	case "/users":
+		h.SendUserList(client)
+	case "/help":
+		msg := ChatMessage{
+			Timestamp:   time.Now(),
+			ClientID:    "Server",
+			Content:     "Available commands: /users, /help, /quit, /time",
+			MessageType: "system",
+		}
+
+		formatted := FormatMessage(msg)
+		if _, err := client.Conn.Write([]byte(formatted + "\n")); err != nil {
+			fmt.Printf("write system to %s: %v\n", client.Conn.RemoteAddr(), err)
+		}
+	case "/time":
+		msg := ChatMessage{
+			Timestamp:   time.Now(),
+			ClientID:    "Server",
+			Content:     fmt.Sprintf("Current time: %s", time.Now().Format("15:04:05")),
+			MessageType: "system",
+		}
+
+		formatted := FormatMessage(msg)
+		if _, err := client.Conn.Write([]byte(formatted + "\n")); err != nil {
+			fmt.Printf("write system to %s: %v\n", client.Conn.RemoteAddr(), err)
+		}
+	case "/quit":
+		msg := ChatMessage{
+			Timestamp:   time.Now(),
+			ClientID:    "server",
+			Content:     "Goodbye! Closing connection.",
+			MessageType: "system",
+		}
+		formatted := FormatMessage(msg)
+		client.Conn.Write([]byte(formatted + "\n"))
+
+		client.Conn.Close()
+	default:
+		msg := ChatMessage{
+			Timestamp:   time.Now(),
+			ClientID:    "server",
+			Content:     fmt.Sprintf("Unknown command: %s", command),
+			MessageType: "system",
+		}
+		formatted := FormatMessage(msg)
+		client.Conn.Write([]byte(formatted + "\n"))
+	}
+}
+
+func (h *Hub) sendHistoryToClient(client *Client) {
+	history := h.MessageHistory.GetRecent()
+
+	if len(history) == 0 {
+		return
+	}
+
+	headerMsg := ChatMessage{
+		Timestamp:   time.Now(),
+		ClientID:    "server",
+		Content:     "--- Recent messages ---",
+		MessageType: "system",
+	}
+	formatted := FormatMessage(headerMsg)
+	client.Conn.Write([]byte(formatted + "\n"))
+
+	for _, msg := range history {
+		formatted = FormatMessage(msg)
+		client.Conn.Write([]byte(formatted + "\n"))
+	}
+
+	footerMsg := ChatMessage{
+		Timestamp:   time.Now(),
+		ClientID:    "server",
+		Content:     "--- End of history ---",
+		MessageType: "system",
+	}
+	formatted = FormatMessage(footerMsg)
+	client.Conn.Write([]byte(formatted + "\n"))
+}
 
 func FormatMessage(msg ChatMessage) string {
 	formattedTime := msg.Timestamp.Format("15:04:05")
@@ -74,6 +208,12 @@ func handleClientMessages(client *Client, h *Hub) error {
 		conn.SetReadDeadline(time.Now().Add(readTimeout))
 
 		content := scanner.Text()
+
+		if strings.HasPrefix(content, "/") {
+			h.HandleCommand(client, content)
+			continue
+		}
+
 		msg := ParseIncomingMessage(content, client.ID)
 
 		h.Broadcast <- msg
@@ -160,6 +300,7 @@ func (h *Hub) Run() {
 				return
 			}
 
+			h.MessageHistory.Add(msg)
 			h.BroadcastMessage(msg)
 		case req, ok := <-h.clientsReq:
 			if !ok {
@@ -242,6 +383,8 @@ func (h *Hub) setupClientConnection(conn net.Conn) *Client {
 	fmt.Printf("Client %s connected from %s\n", clientID, conn.RemoteAddr())
 	fmt.Printf("Welcome message sent to %s\n", clientID)
 
+	h.sendHistoryToClient(client)
+
 	return client
 }
 
@@ -257,9 +400,6 @@ func (h *Hub) cleanupClient(client *Client) {
 	h.Broadcast <- disconnectMsg
 
 	client.Conn.Close()
-
-	fmt.Printf("Client %s disconnected (timeout)\n", client.ID)
-	fmt.Printf("Cleanup completed for %s\n", client.ID)
 }
 
 func main() {
@@ -270,6 +410,10 @@ func main() {
 		unregister: make(chan *Client, 1),
 		clientsReq: make(chan *Request, 1),
 		countReq:   make(chan *CountRequest, 1),
+		MessageHistory: MessageHistory{
+			messages: make([]ChatMessage, historySize),
+			size:     historySize,
+		},
 	}
 
 	go hub.Run()
