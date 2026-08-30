@@ -27,11 +27,21 @@ type Client struct {
 	JoinTime time.Time
 }
 
+type Request struct {
+	Response chan []string
+}
+
+type CountRequest struct {
+	Response chan int
+}
+
 type Hub struct {
 	Clients    map[string]*Client
 	Broadcast  chan ChatMessage
 	register   chan *Client
 	unregister chan *Client
+	clientsReq chan *Request
+	countReq   chan *CountRequest
 }
 
 func FormatMessage(msg ChatMessage) string {
@@ -89,12 +99,15 @@ func handleClient(conn net.Conn, clientID string, h *Hub) {
 
 	h.register <- client
 
+	fmt.Printf("Client %s connected. Total: %d\n", clientID, h.GetClientCount())
+
 	if err := HandleClient(client, h); err != nil {
 		fmt.Printf("Client %s error: %v\n", client.ID, err)
 	}
 
 	h.unregister <- client
-	fmt.Printf("Client %s disconnected\n", client.ID)
+
+	fmt.Printf("Client %s disconnected. Total: %d\n", clientID, h.GetClientCount())
 }
 
 func StartEchoServer(port string, h *Hub) error {
@@ -148,6 +161,26 @@ func (h *Hub) Run() {
 			}
 
 			h.BroadcastMessage(msg)
+		case req, ok := <-h.clientsReq:
+			if !ok {
+				return
+			}
+
+			clientIds := make([]string, 0, len(h.Clients))
+
+			for _, cl := range h.Clients {
+				clientIds = append(clientIds, cl.ID)
+			}
+
+			req.Response <- clientIds
+		case req, ok := <-h.countReq:
+			if !ok {
+				return
+			}
+
+			count := len(h.Clients)
+
+			req.Response <- count
 		}
 	}
 }
@@ -162,11 +195,33 @@ func (h *Hub) BroadcastMessage(msg ChatMessage) {
 		_, err := cl.Conn.Write([]byte(formatted + "\n"))
 		if err != nil {
 			fmt.Printf("write error to %s: %v\n", cl.Conn.RemoteAddr(), err)
-
 			cl.Conn.Close()
 		}
 	}
+}
 
+func (h *Hub) GetActiveClients() []string {
+	resp := make(chan []string, 1)
+
+	req := &Request{
+		Response: resp,
+	}
+
+	h.clientsReq <- req
+
+	return <-resp
+}
+
+func (h *Hub) GetClientCount() int {
+	resp := make(chan int, 1)
+
+	req := &CountRequest{
+		Response: resp,
+	}
+
+	h.countReq <- req
+
+	return <-resp
 }
 
 func main() {
@@ -175,6 +230,8 @@ func main() {
 		Broadcast:  make(chan ChatMessage),
 		register:   make(chan *Client, 1),
 		unregister: make(chan *Client, 1),
+		clientsReq: make(chan *Request, 1),
+		countReq:   make(chan *CountRequest, 1),
 	}
 
 	go hub.Run()
