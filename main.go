@@ -27,6 +27,13 @@ type Client struct {
 	JoinTime time.Time
 }
 
+type Hub struct {
+	Clients    map[string]*Client
+	Broadcast  chan ChatMessage
+	register   chan *Client
+	unregister chan *Client
+}
+
 func FormatMessage(msg ChatMessage) string {
 	formattedTime := msg.Timestamp.Format("15:04:05")
 	if msg.MessageType == "system" {
@@ -45,20 +52,17 @@ func ParseIncomingMessage(raw, senderID string) ChatMessage {
 	}
 }
 
-func HandleClient(client *Client) error {
+func HandleClient(client *Client, h *Hub) error {
 	conn := client.Conn
 	scanner := bufio.NewScanner(conn)
 
 	for scanner.Scan() {
 		content := scanner.Text()
 		msg := ParseIncomingMessage(content, client.ID)
-		formattedMsg := FormatMessage(msg)
+
+		h.Broadcast <- msg
 
 		fmt.Printf("[%s] Received from %s: %s\n", msg.Timestamp.Format("15:04:05"), msg.ClientID, msg.Content)
-
-		if _, err := conn.Write([]byte(formattedMsg + "\n")); err != nil {
-			return fmt.Errorf("write error to %s: %w", conn.RemoteAddr(), err)
-		}
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -72,7 +76,7 @@ func GenerateClientID() string {
 	return uuid.New().String()[:8]
 }
 
-func handleClient(conn net.Conn, clientID string) {
+func handleClient(conn net.Conn, clientID string, h *Hub) {
 	defer conn.Close()
 
 	fmt.Printf("Client %s connected, starting goroutine\n", clientID)
@@ -83,14 +87,17 @@ func handleClient(conn net.Conn, clientID string) {
 		JoinTime: time.Now(),
 	}
 
-	if err := HandleClient(client); err != nil {
+	h.register <- client
+
+	if err := HandleClient(client, h); err != nil {
 		fmt.Printf("Client %s error: %v\n", client.ID, err)
 	}
 
+	h.unregister <- client
 	fmt.Printf("Client %s disconnected\n", client.ID)
 }
 
-func StartEchoServer(port string) error {
+func StartEchoServer(port string, h *Hub) error {
 	if port == "" {
 		return ErrorPortEmpty
 	}
@@ -110,12 +117,69 @@ func StartEchoServer(port string) error {
 
 		clientID := "User_" + GenerateClientID()
 
-		go handleClient(conn, clientID)
+		go handleClient(conn, clientID, h)
 	}
 }
 
+func (h *Hub) Run() {
+	for {
+		select {
+		case cl, ok := <-h.register:
+			if !ok {
+				return
+			}
+
+			if _, existsClient := h.Clients[cl.ID]; existsClient {
+				fmt.Println("user has register")
+
+				continue
+			}
+
+			h.Clients[cl.ID] = cl
+		case cl, ok := <-h.unregister:
+			if !ok {
+				return
+			}
+
+			delete(h.Clients, cl.ID)
+		case msg, ok := <-h.Broadcast:
+			if !ok {
+				return
+			}
+
+			h.BroadcastMessage(msg)
+		}
+	}
+}
+
+func (h *Hub) BroadcastMessage(msg ChatMessage) {
+	for _, cl := range h.Clients {
+		if cl.ID == msg.ClientID {
+			continue
+		}
+
+		formatted := FormatMessage(msg)
+		_, err := cl.Conn.Write([]byte(formatted + "\n"))
+		if err != nil {
+			fmt.Printf("write error to %s: %v\n", cl.Conn.RemoteAddr(), err)
+
+			cl.Conn.Close()
+		}
+	}
+
+}
+
 func main() {
-	if err := StartEchoServer(":8080"); err != nil {
+	hub := &Hub{
+		Clients:    make(map[string]*Client),
+		Broadcast:  make(chan ChatMessage),
+		register:   make(chan *Client, 1),
+		unregister: make(chan *Client, 1),
+	}
+
+	go hub.Run()
+
+	if err := StartEchoServer(":8080", hub); err != nil {
 		fmt.Printf("Server error: %v\n", err)
 	}
 }
