@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 	"time"
@@ -50,6 +51,15 @@ type Hub struct {
 	clientsReq     chan *Request
 	countReq       chan *CountRequest
 	MessageHistory MessageHistory
+	Stats          ServerStats
+	startTime      time.Time
+}
+
+type ServerStats struct {
+	ActiveConnections      int
+	TotalMessagesProcessed int64
+	UptimeSeconds          int64
+	ErrorCount             int
 }
 
 const readTimeout = 10 * time.Minute
@@ -236,23 +246,36 @@ func GenerateClientID() string {
 	return uuid.New().String()[:8]
 }
 
-func handleClient(conn net.Conn, h *Hub) {
+func handleClient(conn net.Conn, h *Hub, logger *log.Logger) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Printf("[ERROR] recovered from panic: %v", r)
+			h.Stats.ErrorCount++
+		}
+	}()
+
 	client := h.setupClientConnection(conn)
 
 	clientID := client.ID
 
 	h.register <- client
 
-	fmt.Printf("Client %s connected. Total: %d\n", clientID, h.GetClientCount())
+	logger.Printf("[INFO] Client %s connected. Total: %d\n", clientID, h.GetClientCount())
+
+	h.Stats.ActiveConnections++
 
 	if err := handleClientMessages(client, h); err != nil {
-		fmt.Printf("Client %s error: %v\n", client.ID, err)
+		logger.Printf("[ERROR] Client %s error: %v\n", client.ID, err)
+		h.Stats.ErrorCount++
 	}
 
-	fmt.Printf("Client %s disconnected. Total: %d\n", clientID, h.GetClientCount())
+	h.Stats.ActiveConnections--
+	h.Stats.UptimeSeconds = int64(time.Since(h.startTime).Seconds())
+
+	logger.Printf("[WARN] Client %s disconnected. Total: %d\n", clientID, h.GetClientCount())
 }
 
-func StartEchoServer(port string, h *Hub) error {
+func StartEchoServer(port string, h *Hub, logger *log.Logger) error {
 	if port == "" {
 		return ErrorPortEmpty
 	}
@@ -262,7 +285,7 @@ func StartEchoServer(port string, h *Hub) error {
 	}
 	defer listener.Close()
 
-	fmt.Printf("TCP Echo Server listening on %s\n", port)
+	logger.Printf("[INFO] Server starting on port %s", port)
 
 	for {
 		conn, err := listener.Accept()
@@ -270,7 +293,7 @@ func StartEchoServer(port string, h *Hub) error {
 			return fmt.Errorf("failed to accept connection: %w", err)
 		}
 
-		go handleClient(conn, h)
+		go handleClient(conn, h, logger)
 	}
 }
 
@@ -302,6 +325,8 @@ func (h *Hub) Run() {
 
 			h.MessageHistory.Add(msg)
 			h.BroadcastMessage(msg)
+
+			h.Stats.TotalMessagesProcessed++
 		case req, ok := <-h.clientsReq:
 			if !ok {
 				return
@@ -402,7 +427,18 @@ func (h *Hub) cleanupClient(client *Client) {
 	client.Conn.Close()
 }
 
+func setupLogging(level string) *log.Logger {
+	log.SetFlags(log.Ldate | log.Ltime)
+	log.SetPrefix("[TCP-CHAT] ")
+
+	return log.Default()
+}
+
 func main() {
+	logger := setupLogging("INFO")
+
+	logger.Printf("[INFO]  Server starting on port 8080")
+
 	hub := &Hub{
 		Clients:    make(map[string]*Client),
 		Broadcast:  make(chan ChatMessage),
@@ -414,11 +450,13 @@ func main() {
 			messages: make([]ChatMessage, historySize),
 			size:     historySize,
 		},
+		Stats:     ServerStats{},
+		startTime: time.Now(),
 	}
 
 	go hub.Run()
 
-	if err := StartEchoServer(":8080", hub); err != nil {
-		fmt.Printf("Server error: %v\n", err)
+	if err := StartEchoServer(":8080", hub, logger); err != nil {
+		logger.Printf("[ERROR] Server error: %v", err)
 	}
 }
