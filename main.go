@@ -2,13 +2,17 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"log"
 	"net"
+	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -47,6 +51,7 @@ type MessageHistory struct {
 }
 
 type Hub struct {
+	mu             sync.RWMutex
 	Clients        map[string]*Client
 	Broadcast      chan ChatMessage
 	register       chan *Client
@@ -269,9 +274,9 @@ func handleClient(conn net.Conn, h *Hub, logger *log.Logger) {
 
 	h.register <- client
 
-	logger.Printf("[INFO] Client %s connected. Total: %d\n", clientID, h.GetClientCount())
-
 	atomic.AddInt64(&h.Stats.ActiveConnections, 1)
+
+	logger.Printf("[INFO] Client %s connected. Total: %d\n", clientID, atomic.LoadInt64(&h.Stats.ActiveConnections))
 
 	if err := handleClientMessages(client, h); err != nil {
 		logger.Printf("[ERROR] Client %s error: %v\n", client.ID, err)
@@ -279,9 +284,9 @@ func handleClient(conn net.Conn, h *Hub, logger *log.Logger) {
 	}
 
 	atomic.AddInt64(&h.Stats.ActiveConnections, -1)
-	h.Stats.UptimeSeconds = int64(time.Since(h.startTime).Seconds())
+	atomic.StoreInt64(&h.Stats.UptimeSeconds, int64(time.Since(h.startTime).Seconds()))
 
-	logger.Printf("[WARN] Client %s disconnected. Total: %d\n", clientID, h.GetClientCount())
+	logger.Printf("[WARN] Client %s disconnected. Total: %d\n", clientID, atomic.LoadInt64(&h.Stats.ActiveConnections))
 }
 
 func StartEchoServer(port string, h *Hub, logger *log.Logger) error {
@@ -314,19 +319,24 @@ func (h *Hub) Run() {
 				return
 			}
 
+			h.mu.Lock()
 			if _, existsClient := h.Clients[cl.ID]; existsClient {
+				h.mu.Unlock()
 				fmt.Println("user has register")
 
 				continue
 			}
 
 			h.Clients[cl.ID] = cl
+			h.mu.Unlock()
 		case cl, ok := <-h.unregister:
 			if !ok {
 				return
 			}
 
+			h.mu.Lock()
 			delete(h.Clients, cl.ID)
+			h.mu.Unlock()
 		case msg, ok := <-h.Broadcast:
 			if !ok {
 				return
@@ -341,11 +351,14 @@ func (h *Hub) Run() {
 				return
 			}
 
+			h.mu.RLock()
 			clientIds := make([]string, 0, len(h.Clients))
 
 			for _, cl := range h.Clients {
 				clientIds = append(clientIds, cl.ID)
 			}
+
+			h.mu.RUnlock()
 
 			req.Response <- clientIds
 		case req, ok := <-h.countReq:
@@ -353,7 +366,9 @@ func (h *Hub) Run() {
 				return
 			}
 
+			h.mu.RLock()
 			count := len(h.Clients)
+			h.mu.RUnlock()
 
 			req.Response <- count
 		}
@@ -361,6 +376,9 @@ func (h *Hub) Run() {
 }
 
 func (h *Hub) BroadcastMessage(msg ChatMessage) {
+	h.mu.RLock()
+	h.mu.RUnlock()
+
 	for _, cl := range h.Clients {
 		if cl.ID == msg.ClientID {
 			continue
@@ -443,7 +461,57 @@ func setupLogging(level string) *log.Logger {
 	return log.Default()
 }
 
+func setupSignalHandling() chan os.Signal {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	return ch
+}
+
+func (h *Hub) Shutdown(ctx context.Context) error {
+	h.mu.RLock()
+
+	shutdownMsg := ChatMessage{
+		Timestamp:   time.Now(),
+		ClientID:    "server",
+		Content:     "Server shutting down in 10 seconds",
+		MessageType: "system",
+	}
+
+	for _, client := range h.Clients {
+		client.Conn.Write([]byte(FormatMessage(shutdownMsg) + "\n"))
+	}
+
+	h.mu.RUnlock()
+
+	close(h.Broadcast)
+
+	for {
+		select {
+		case <-ctx.Done():
+			h.mu.RLock()
+			for _, client := range h.Clients {
+				client.Conn.Close()
+			}
+			h.mu.RUnlock()
+			return ctx.Err()
+
+		case <-time.After(10 * time.Second):
+			h.mu.RLock()
+			for _, client := range h.Clients {
+				client.Conn.Close()
+			}
+			h.mu.RUnlock()
+			return nil
+		}
+	}
+}
+
 func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigChan := setupSignalHandling()
+
 	logger := setupLogging("INFO")
 
 	hub := &Hub{
@@ -463,7 +531,18 @@ func main() {
 
 	go hub.Run()
 
-	if err := StartEchoServer(":8080", hub, logger); err != nil {
-		logger.Printf("[ERROR] Server error: %v", err)
+	go func() {
+		if err := StartEchoServer(":8080", hub, logger); err != nil {
+			logger.Printf("[ERROR] Server error: %v", err)
+		}
+	}()
+
+	sig := <-sigChan
+	logger.Printf("[WARN] Shutdown signal received: %v", sig)
+
+	if err := hub.Shutdown(ctx); err != nil {
+		logger.Printf("[ERROR] Shutdown error: %v", err)
 	}
+
+	logger.Printf("[INFO] Server stopped gracefully")
 }
