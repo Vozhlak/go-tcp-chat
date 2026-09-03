@@ -7,6 +7,8 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,6 +40,7 @@ type CountRequest struct {
 }
 
 type MessageHistory struct {
+	mu       sync.RWMutex
 	messages []ChatMessage
 	head     int
 	size     int
@@ -56,21 +59,27 @@ type Hub struct {
 }
 
 type ServerStats struct {
-	ActiveConnections      int
+	ActiveConnections      int64
 	TotalMessagesProcessed int64
 	UptimeSeconds          int64
-	ErrorCount             int
+	ErrorCount             int64
 }
 
 const readTimeout = 10 * time.Minute
 const historySize = 50
 
 func (mh *MessageHistory) Add(msg ChatMessage) {
+	mh.mu.Lock()
+	defer mh.mu.Unlock()
+
 	mh.messages[mh.head%mh.size] = msg
 	mh.head++
 }
 
 func (mh *MessageHistory) GetRecent() []ChatMessage {
+	mh.mu.RLock()
+	defer mh.mu.RUnlock()
+
 	if mh.head == 0 {
 		return []ChatMessage{}
 	}
@@ -250,7 +259,7 @@ func handleClient(conn net.Conn, h *Hub, logger *log.Logger) {
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Printf("[ERROR] recovered from panic: %v", r)
-			h.Stats.ErrorCount++
+			atomic.AddInt64(&h.Stats.ErrorCount, 1)
 		}
 	}()
 
@@ -262,14 +271,14 @@ func handleClient(conn net.Conn, h *Hub, logger *log.Logger) {
 
 	logger.Printf("[INFO] Client %s connected. Total: %d\n", clientID, h.GetClientCount())
 
-	h.Stats.ActiveConnections++
+	atomic.AddInt64(&h.Stats.ActiveConnections, 1)
 
 	if err := handleClientMessages(client, h); err != nil {
 		logger.Printf("[ERROR] Client %s error: %v\n", client.ID, err)
-		h.Stats.ErrorCount++
+		atomic.AddInt64(&h.Stats.ErrorCount, 1)
 	}
 
-	h.Stats.ActiveConnections--
+	atomic.AddInt64(&h.Stats.ActiveConnections, -1)
 	h.Stats.UptimeSeconds = int64(time.Since(h.startTime).Seconds())
 
 	logger.Printf("[WARN] Client %s disconnected. Total: %d\n", clientID, h.GetClientCount())
@@ -326,7 +335,7 @@ func (h *Hub) Run() {
 			h.MessageHistory.Add(msg)
 			h.BroadcastMessage(msg)
 
-			h.Stats.TotalMessagesProcessed++
+			atomic.AddInt64(&h.Stats.TotalMessagesProcessed, 1)
 		case req, ok := <-h.clientsReq:
 			if !ok {
 				return
@@ -436,8 +445,6 @@ func setupLogging(level string) *log.Logger {
 
 func main() {
 	logger := setupLogging("INFO")
-
-	logger.Printf("[INFO]  Server starting on port 8080")
 
 	hub := &Hub{
 		Clients:    make(map[string]*Client),
