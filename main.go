@@ -3,11 +3,13 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -491,8 +493,6 @@ func (h *Hub) Shutdown(ctx context.Context) error {
 
 	h.mu.RUnlock()
 
-	close(h.Broadcast)
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -545,6 +545,84 @@ func printStartupBanner(cfg ServerConfig) {
 	fmt.Println()
 }
 
+func startHTTPMonitoring(hub *Hub, port string) {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/health", handleHealthEndpoint(hub))
+	mux.HandleFunc("/stats", handleStatsEndpoint(hub))
+
+	server := &http.Server{
+		Addr:         ":" + port,
+		Handler:      mux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+
+	}
+}
+
+type HealthResponse struct {
+	Status            string `json:"status"`
+	ActiveConnections int64  `json:"active_connections"`
+	UptimeSeconds     int64  `json:"uptime_seconds"`
+}
+
+type StatsResponse struct {
+	ActiveConnections      int64   `json:"active_connections"`
+	TotalMessagesProcessed int64   `json:"total_messages_processed"`
+	UptimeSeconds          int64   `json:"uptime_seconds"`
+	ErrorCount             int64   `json:"error_count"`
+	MessageRate            float64 `json:"message_rate"`
+}
+
+func handleHealthEndpoint(hub *Hub) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		activeConnections := atomic.LoadInt64(&hub.Stats.ActiveConnections)
+		uptimeSeconds := atomic.LoadInt64(&hub.Stats.UptimeSeconds)
+
+		response := HealthResponse{
+			Status:            "healthy",
+			ActiveConnections: activeConnections,
+			UptimeSeconds:     uptimeSeconds,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		json.NewEncoder(w).Encode(response)
+	}
+}
+
+func handleStatsEndpoint(hub *Hub) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		activeConnections := atomic.LoadInt64(&hub.Stats.ActiveConnections)
+		totalMessages := atomic.LoadInt64(&hub.Stats.TotalMessagesProcessed)
+		uptimeSeconds := atomic.LoadInt64(&hub.Stats.UptimeSeconds)
+		errorCount := atomic.LoadInt64(&hub.Stats.ErrorCount)
+
+		messageRate := 0.0
+		if uptimeSeconds > 0 {
+			messageRate = float64(totalMessages) / float64(uptimeSeconds)
+		}
+
+		response := StatsResponse{
+			ActiveConnections:      activeConnections,
+			TotalMessagesProcessed: totalMessages,
+			UptimeSeconds:          uptimeSeconds,
+			ErrorCount:             errorCount,
+			MessageRate:            messageRate,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		json.NewEncoder(w).Encode(response)
+	}
+}
+
 func main() {
 	cfg := parseCommandLineArgs()
 
@@ -573,6 +651,8 @@ func main() {
 	}
 
 	go hub.Run()
+
+	go startHTTPMonitoring(hub, "8081")
 
 	go func() {
 		if err := StartEchoServer(":"+cfg.Port, hub, logger); err != nil {
