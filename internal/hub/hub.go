@@ -5,12 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"go-tcp-chat/internal/domain"
 	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Vozhlak/go-tcp-chat/internal/domain"
 
 	"github.com/google/uuid"
 )

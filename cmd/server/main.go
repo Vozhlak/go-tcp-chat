@@ -3,7 +3,7 @@ package main
 import (
 	"log"
 
-	"go-tcp-chat/internal/app"
+	"github.com/Vozhlak/go-tcp-chat/internal/app"
 )
 
 func main() {

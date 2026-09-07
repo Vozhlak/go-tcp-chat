@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go-tcp-chat/internal/domain"
-	"go-tcp-chat/internal/hub"
+	"github.com/Vozhlak/go-tcp-chat/internal/domain"
+	"github.com/Vozhlak/go-tcp-chat/internal/hub"
 )
 
 // HTTPServer представляет HTTP сервер для мониторинга

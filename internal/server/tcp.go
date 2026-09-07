@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go-tcp-chat/internal/hub"
+	"github.com/Vozhlak/go-tcp-chat/internal/hub"
 )
 
 var (

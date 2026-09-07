@@ -3,7 +3,7 @@ package config
 import (
 	"flag"
 
-	"go-tcp-chat/internal/domain"
+	"github.com/Vozhlak/go-tcp-chat/internal/domain"
 )
 
 // Parse парсит аргументы командной строки

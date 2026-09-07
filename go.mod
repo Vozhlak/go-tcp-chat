@@ -1,4 +1,4 @@
-module go-tcp-chat
+module github.com/Vozhlak/go-tcp-chat
 
 go 1.25
 

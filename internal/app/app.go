@@ -8,10 +8,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"go-tcp-chat/internal/config"
-	"go-tcp-chat/internal/domain"
-	"go-tcp-chat/internal/hub"
-	"go-tcp-chat/internal/server"
+	"github.com/Vozhlak/go-tcp-chat/internal/config"
+	"github.com/Vozhlak/go-tcp-chat/internal/domain"
+	"github.com/Vozhlak/go-tcp-chat/internal/hub"
+	"github.com/Vozhlak/go-tcp-chat/internal/server"
 )
 
 // App представляет приложение
