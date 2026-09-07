@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -68,6 +69,13 @@ type ServerStats struct {
 	TotalMessagesProcessed int64
 	UptimeSeconds          int64
 	ErrorCount             int64
+}
+
+type ServerConfig struct {
+	Port               string
+	MaxConnections     int
+	LogLevel           string
+	MessageHistorySize int
 }
 
 const readTimeout = 10 * time.Minute
@@ -506,13 +514,48 @@ func (h *Hub) Shutdown(ctx context.Context) error {
 	}
 }
 
+func parseCommandLineArgs() ServerConfig {
+	port := flag.String("port", "8080", "Server port (default \"8080\")")
+	maxConnections := flag.Int("max-connections", 500, "Maximum connections (default 500)")
+	logLevel := flag.String("log-level", "INFO", "Log level (default \"INFO\")")
+	messageHistorySize := flag.Int("message-history-size", 50, "Message history size (default 50)")
+
+	flag.Parse()
+
+	return ServerConfig{
+		Port:               *port,
+		MaxConnections:     *maxConnections,
+		LogLevel:           *logLevel,
+		MessageHistorySize: *messageHistorySize,
+	}
+}
+
+func printStartupBanner(cfg ServerConfig) {
+	fmt.Println("╔══════════════════════════════════════╗")
+	fmt.Println("║         TCP Chat Server              ║")
+	fmt.Println("╚══════════════════════════════════════╝")
+
+	// Текущая конфигурация
+	fmt.Printf("Port:            %s\n", cfg.Port)
+	fmt.Printf("Max Connections: %d\n", cfg.MaxConnections)
+	fmt.Printf("Log Level:       %s\n", cfg.LogLevel)
+
+	// Инструкции по подключению
+	fmt.Printf("Connect using: telnet localhost %s\n", cfg.Port)
+	fmt.Println()
+}
+
 func main() {
+	cfg := parseCommandLineArgs()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	sigChan := setupSignalHandling()
 
-	logger := setupLogging("INFO")
+	logger := setupLogging(cfg.LogLevel)
+
+	printStartupBanner(cfg)
 
 	hub := &Hub{
 		Clients:    make(map[string]*Client),
@@ -522,8 +565,8 @@ func main() {
 		clientsReq: make(chan *Request, 1),
 		countReq:   make(chan *CountRequest, 1),
 		MessageHistory: MessageHistory{
-			messages: make([]ChatMessage, historySize),
-			size:     historySize,
+			messages: make([]ChatMessage, cfg.MessageHistorySize),
+			size:     cfg.MessageHistorySize,
 		},
 		Stats:     ServerStats{},
 		startTime: time.Now(),
@@ -532,7 +575,7 @@ func main() {
 	go hub.Run()
 
 	go func() {
-		if err := StartEchoServer(":8080", hub, logger); err != nil {
+		if err := StartEchoServer(":"+cfg.Port, hub, logger); err != nil {
 			logger.Printf("[ERROR] Server error: %v", err)
 		}
 	}()
